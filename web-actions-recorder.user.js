@@ -374,8 +374,14 @@
             let part = current.tagName.toLowerCase();
             const parent = current.parentElement;
             if (parent) {
-                const siblings = Array.from(parent.children).filter((child) => child.tagName === current.tagName);
-                if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+                let sameTagCount = 0;
+                let sameTagIndex = 0;
+                for (const child of parent.children) {
+                    if (child.tagName !== current.tagName) continue;
+                    sameTagCount += 1;
+                    if (child === current) sameTagIndex = sameTagCount;
+                }
+                if (sameTagCount > 1) part += `:nth-of-type(${sameTagIndex})`;
             }
             parts.unshift(part);
             if (isUniqueSelector(parts.join(' > '))) return parts.join(' > ');
@@ -396,10 +402,18 @@
         let current = element;
         while (current?.nodeType === Node.ELEMENT_NODE) {
             const tag = current.tagName.toLowerCase();
-            const siblings = current.parentElement
-                ? Array.from(current.parentElement.children).filter((child) => child.tagName === current.tagName)
-                : [current];
-            parts.unshift(siblings.length > 1 ? `${tag}[${siblings.indexOf(current) + 1}]` : tag);
+            let sameTagCount = 1;
+            let sameTagIndex = 1;
+            if (current.parentElement) {
+                sameTagCount = 0;
+                sameTagIndex = 0;
+                for (const child of current.parentElement.children) {
+                    if (child.tagName !== current.tagName) continue;
+                    sameTagCount += 1;
+                    if (child === current) sameTagIndex = sameTagCount;
+                }
+            }
+            parts.unshift(sameTagCount > 1 ? `${tag}[${sameTagIndex}]` : tag);
             current = current.parentElement;
         }
         return `/${parts.join('/')}`;
@@ -667,9 +681,18 @@
             panelHost.style.left = `${Math.max(0, Math.min(innerWidth - rect.width, event.clientX - offsetX))}px`;
             panelHost.style.top = `${Math.max(0, Math.min(innerHeight - rect.height, event.clientY - offsetY))}px`;
         });
-        for (const eventName of ['pointerup', 'pointercancel']) {
-            handle.addEventListener(eventName, () => { dragging = false; });
-        }
+        const stopDragging = () => { dragging = false; };
+        handle.addEventListener('pointerup', stopDragging);
+        handle.addEventListener('pointercancel', stopDragging);
+    }
+
+    function hookHistoryMethod(method) {
+        const original = history[method];
+        history[method] = function (...args) {
+            const result = original.apply(this, args);
+            setTimeout(recordNavigation, 0);
+            return result;
+        };
     }
 
     document.addEventListener('click', handleClick, true);
@@ -685,14 +708,8 @@
     window.addEventListener('hashchange', recordNavigation);
     window.addEventListener('beforeunload', flushPendingInputs);
 
-    for (const method of ['pushState', 'replaceState']) {
-        const original = history[method];
-        history[method] = function (...args) {
-            const result = original.apply(this, args);
-            setTimeout(recordNavigation, 0);
-            return result;
-        };
-    }
+    hookHistoryMethod('pushState');
+    hookHistoryMethod('replaceState');
 
     setInterval(recordNavigation, 500);
     if (window === window.top && state.recording && state.lastUrl !== location.href) recordNavigation();
