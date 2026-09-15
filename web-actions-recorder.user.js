@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Web Actions Recorder
 // @namespace    https://tampermonkey.net/
-// @version      2.2.0
+// @version      2.3.0
 // @description  Ghi thao tac theo tab, tam dung/tiep tuc, kiem tra selector, xuat JSON va Playwright.
 // @match        http://*/*
 // @match        https://*/*
@@ -266,7 +266,8 @@
                 node_selector: shortestSelector(node), path,
                 control: element.closest('.jstree-checkbox') ? 'checkbox' : element.closest('.jstree-ocl') ? 'expand' : 'select' };
         }
-        const cell = element.closest('td');
+        const row = element.closest('tr');
+        const cell = element.closest('td') || row?.cells?.[1] || row?.cells?.[0];
         const table = cell?.closest('table');
         if (table && !element.closest('button, a, input, select, textarea, [role="button"]') && (table.classList.contains('dataTable') || table.closest('.dataTables_wrapper') || /^tbl/.test(table.id))) {
             return { kind: 'table', table_selector: shortestSelector(table), row_selector: shortestSelector(cell.parentElement),
@@ -431,13 +432,30 @@
             attributes: attributesOf(element),
             label: fieldName(element),
             shadow_path: shadowPath(element),
-            modal: modalContext(element)
+            modal: modalContext(element),
+            table_context: tableTargetContext(element)
         };
     }
 
     function modalContext(element) {
         const modal = element.closest('.modal, [role="dialog"], .bootbox, .swal2-popup');
         return modal ? { css_selector: shortestSelector(modal), title: cleanText(modal.querySelector('.modal-title, .swal2-title, [role="heading"]')?.textContent) } : null;
+    }
+
+    function tableTargetContext(element) {
+        const row = element.closest('tbody > tr');
+        const table = row?.closest('table');
+        if (!table) return null;
+        const cell = element.closest('td');
+        const link = element.closest('a, button');
+        return { table_selector: shortestSelector(table), cells: Array.from(row.cells, item => cleanText(item.textContent)),
+            cell_index: cell?.cellIndex ?? 0, control: link ? link.tagName.toLowerCase() : null,
+            control_text: link ? cleanText(link.textContent) : null };
+    }
+
+    function stableSelector(selector) {
+        return String(selector).replace(/#([\w-]*?)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+            (_, prefix) => `[id^="${prefix}-"]`);
     }
 
     function cleanText(value) {
@@ -953,15 +971,18 @@
     async function replayVbdlisWidget(scope, step) {
         const widget = step.widget;
         if (!widget.after) throw new Error('Không quan sát được trạng thái sau click; ghi lại bước này.');
-        if (/REDACTED/.test(JSON.stringify(widget))) throw new Error('Định danh widget đã che dữ liệu; cần thay bằng dữ liệu hồ sơ.');
         const unique = async (locator, name) => {
             await expect(locator, `${name}: cần đúng một phần tử`).toHaveCount(1, { timeout: 15000 });
             return locator;
         };
         let container = scope;
-        if (step.target?.modal) container = await unique(scope.locator(step.target.modal.css_selector).filter({ visible: true }), 'Modal');
+        if (step.target?.modal) container = await unique(scope.locator(stableSelector(step.target.modal.css_selector)).filter({ visible: true }), 'Modal');
         if (widget.kind === 'tree') {
-            const tree = await unique(container.locator(widget.tree_selector), 'Cây');
+            const treeSelector = /^\.jstree-\d+$/.test(widget.tree_selector || '') ? '.jstree' : stableSelector(widget.tree_selector);
+            let trees = container.locator(treeSelector);
+            const textPattern = text => new RegExp('^\\s*' + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '\\s*$');
+            if (await trees.count() !== 1) trees = trees.filter({ has: scope.locator('.jstree-anchor').filter({ hasText: textPattern(widget.path[0]) }) });
+            const tree = await unique(trees, 'Cây');
             let parent = tree;
             let node;
             for (let i = 0; i < widget.path.length; i++) {
@@ -976,21 +997,24 @@
                 parent = node;
             }
             if (!node) throw new Error('Thiếu đường dẫn node');
-            const property = { checkbox: 'checked', expand: 'expanded', select: 'selected' }[widget.control];
+            const changed = ['checked', 'selected', 'expanded'].filter(key => typeof widget.after[key] === 'boolean' && widget.before?.[key] !== widget.after[key]);
+            const properties = changed.length ? changed : [{ checkbox: 'checked', expand: 'expanded', select: 'selected' }[widget.control]];
             if (widget.control === 'checkbox' && widget.after.indeterminate) throw new Error('Node có trạng thái trung gian; cần ghi thao tác trên node con.');
-            const read = () => node.evaluate((el, prop) => {
+            const read = property => node.evaluate((el, prop) => {
                 const anchor = el.querySelector(':scope > .jstree-anchor');
                 if (prop === 'expanded') return el.classList.contains('jstree-open') || el.getAttribute('aria-expanded') === 'true';
                 if (prop === 'checked') return Boolean(anchor?.classList.contains('jstree-checked')) || el.getAttribute('aria-checked') === 'true';
                 return Boolean(anchor?.classList.contains('jstree-clicked')) || el.getAttribute('aria-selected') === 'true';
             }, property);
-            if (await read() !== widget.after[property]) {
+            let needsClick = false;
+            for (const property of properties) if (await read(property) !== widget.after[property]) needsClick = true;
+            if (needsClick) {
                 const control = { checkbox: ':scope > .jstree-anchor > .jstree-checkbox', expand: ':scope > .jstree-ocl', select: ':scope > .jstree-anchor' }[widget.control];
                 await node.locator(control).click();
             }
-            await expect.poll(read, { timeout: 15000 }).toBe(widget.after[property]);
+            for (const property of properties) await expect.poll(() => read(property), { timeout: 15000 }).toBe(widget.after[property]);
         } else {
-            const table = await unique(container.locator(widget.table_selector), 'Bảng');
+            const table = await unique(container.locator(stableSelector(widget.table_selector)), 'Bảng');
             const rows = table.locator('tbody > tr');
             await expect(rows.first()).toBeVisible({ timeout: 15000 });
             const matches = [];
@@ -1018,6 +1042,28 @@
         }
     }
 
+    async function vbdlisTableTarget(scope, context) {
+        if (!Array.isArray(context.cells) || !context.cells.every(v => typeof v === 'string')) throw new Error('Nội dung hàng phải là mảng chuỗi JSON');
+        const table = scope.locator(stableSelector(context.table_selector));
+        await expect(table).toHaveCount(1, { timeout: 15000 });
+        const rows = table.locator('tbody > tr');
+        let index = -1;
+        await expect.poll(async () => {
+            const found = [];
+            for (let i = 0; i < await rows.count(); i++) {
+                const texts = await rows.nth(i).locator(':scope > td').allTextContents();
+                if (JSON.stringify(texts.map(s => s.replace(/\s+/g, ' ').trim().slice(0, 500))) === JSON.stringify(context.cells)) found.push(i);
+            }
+            index = found.length === 1 ? found[0] : -1;
+            return found.length;
+        }, { timeout: 15000, message: 'Cần đúng một hàng khớp nội dung đã ghi' }).toBe(1);
+        const cell = rows.nth(index).locator(':scope > td').nth(context.cell_index);
+        if (!context.control) return cell;
+        const control = cell.locator(context.control).filter({ hasText: new RegExp('^\\s*' + context.control_text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '\\s*$') });
+        await expect(control).toHaveCount(1);
+        return control;
+    }
+
     function inspectStep(index) {
         try {
             const step = state.steps[index];
@@ -1043,20 +1089,28 @@
             '// Các giá trị đã che được lấy từ biến môi trường RECORDER_VALUE_<số bước>.',
             'function required(name) {', '  const value = process.env[name];',
             '  if (!value) throw new Error(`Thiếu biến môi trường ${name}`);', '  return value;', '}', '',
-            replayVbdlisWidget.toString(), '', waitVbdlisReady.toString(), '',
+            stableSelector.toString(), '', replayVbdlisWidget.toString(), '', waitVbdlisReady.toString(), '', vbdlisTableTarget.toString(), '',
             "test('Web Actions Record - VBDLIS', async ({ page }) => {", '  test.setTimeout(180000);'];
         const literal = (value, number) => /REDACTED/.test(q(value) || '') ? `required('RECORDER_VALUE_${number}')` : q(value);
         const locator = (target, step) => {
             if (!target?.css_selector) throw new Error('Thiếu selector');
-            if (/REDACTED/.test(q([target.css_selector, target.shadow_path]))) throw new Error('Selector đã che dữ liệu; cần thay locator');
+            if (/REDACTED/.test(q([target.css_selector, target.shadow_path, target.modal?.css_selector]))) throw new Error('Selector đã che dữ liệu; cần thay locator');
             if (step.frame && (!step.frame.css_selector || step.frame.unresolved)) throw new Error('Cần bổ sung đường dẫn iframe');
             let result = step.frame ? `page.frameLocator(${q(step.frame.css_selector)})` : 'page';
-            if (target.modal?.css_selector && !(target.shadow_path || []).length) result += `.locator(${q(target.modal.css_selector)}).filter({ visible: true })`;
+            if (target.modal?.css_selector && !(target.shadow_path || []).length) {
+                result += `.locator(${q(stableSelector(target.modal.css_selector))}).filter({ visible: true })`;
+                if (target.css_selector === target.modal.css_selector) return result;
+            }
             for (const host of target.shadow_path || []) result += `.locator(${q(host)})`;
-            return `${result}.locator(${q(target.css_selector)})`;
+            if (target.table_context) {
+                const context = target.table_context;
+                const cells = /REDACTED/.test(q(context.cells)) ? `JSON.parse(required('RECORDER_ROW_CELLS_${step.step}'))` : q(context.cells);
+                return `(await vbdlisTableTarget(${result}, { ...${q(context)}, cells: ${cells} }))`;
+            }
+            return `${result}.locator(${q(stableSelector(target.css_selector))})`;
         };
         steps.forEach((raw, index) => {
-            const step = sanitizeStep(raw);
+            const step = { ...sanitizeStep(raw), step: index + 1 };
             const n = index + 1;
             lines.push(`  // Bước ${n}: ${step.action}`);
             try {
@@ -1066,7 +1120,19 @@
                 if (step.widget) {
                     if (step.frame && (!step.frame.css_selector || step.frame.unresolved)) throw new Error('Cần bổ sung đường dẫn iframe');
                     const scope = step.frame ? `page.frameLocator(${q(step.frame.css_selector)})` : 'page';
-                    lines.push(`  await replayVbdlisWidget(${scope}, ${q(step)});`, '  await page.waitForTimeout(600);', '  await waitVbdlisReady(page);');
+                    const payload = `widgetStep${n}`;
+                    lines.push(`  const ${payload} = ${q(step)};`);
+                    if (step.widget.kind === 'tree' && /REDACTED/.test(q(step.widget.path))) {
+                        lines.push(`  // Mảng JSON các nhãn node thực, theo thứ tự cha → con.`,
+                            `  ${payload}.widget.path = JSON.parse(required('RECORDER_TREE_PATH_${n}'));`,
+                            `  if (!Array.isArray(${payload}.widget.path) || !${payload}.widget.path.length || !${payload}.widget.path.every(v => typeof v === 'string')) throw new Error('RECORDER_TREE_PATH_${n} phải là mảng chuỗi');`);
+                    }
+                    if (step.widget.kind === 'table' && /REDACTED/.test(q(step.widget.cells))) {
+                        lines.push(`  // Mảng JSON nội dung các ô thực của hàng cần chọn.`,
+                            `  ${payload}.widget.cells = JSON.parse(required('RECORDER_ROW_CELLS_${n}'));`,
+                            `  if (!Array.isArray(${payload}.widget.cells) || !${payload}.widget.cells.every(v => typeof v === 'string')) throw new Error('RECORDER_ROW_CELLS_${n} phải là mảng chuỗi');`);
+                    }
+                    lines.push(`  await replayVbdlisWidget(${scope}, ${payload});`, '  await page.waitForTimeout(600);', '  await waitVbdlisReady(page);');
                     return;
                 }
                 switch (step.action) {
@@ -1145,7 +1211,7 @@
                 .panel{max-width:calc(100vw - 24px)}.panel.collapsed .body{display:none}.header{gap:8px}.collapse{padding:3px 7px}.notice{font-size:11px;color:#fbbf24;margin-top:8px;overflow-wrap:anywhere}.more{width:100%}
             </style>
             <div class="panel">
-                <div class="header"><span>VBDLIS 2.2</span><span class="status"><i class="dot"></i><span class="status-text"></span></span><button class="collapse" title="Thu gọn / mở rộng">−</button></div>
+                <div class="header"><span>VBDLIS 2.3</span><span class="status"><i class="dot"></i><span class="status-text"></span></span><button class="collapse" title="Thu gọn / mở rộng">−</button></div>
                 <div class="body">
                     <div class="count"><span>Số bước đã ghi</span><strong>0</strong></div>
                     <div class="buttons">
