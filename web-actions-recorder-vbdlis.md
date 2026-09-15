@@ -1,4 +1,21 @@
-# Web Actions Recorder 2.2 — VBDLIS
+# Web Actions Recorder 2.3 — VBDLIS
+
+## Sửa lỗi từ bản ghi VBDLIS thực tế
+
+- Giữ các bước chọn/bỏ chọn jsTree có chủ ý. Phát lại đối chiếu các thuộc tính thực sự thay đổi (`checked`, `selected`, `expanded`), click đúng control ban đầu và kiểm tra từng thuộc tính.
+- Cuộn chính modal không còn tìm modal lồng trong nó.
+- ID có hậu tố UUID được chuyển thành selector theo tiền tố. Class `.jstree-<số>` được thay bằng cây trong đúng modal có nhãn node phù hợp; kết quả mơ hồ sẽ báo lỗi.
+- Bản ghi mới lưu ngữ cảnh hàng cho nút/link tác vụ, chọn theo nội dung các ô thay vì số thứ tự hàng. Click trực tiếp `tr` cũng được quan sát trạng thái chọn.
+- Dữ liệu định danh bị che có thể truyền vào khi chạy: `RECORDER_TREE_PATH_<bước>` là mảng JSON nhãn cha → con, `RECORDER_ROW_CELLS_<bước>` là mảng JSON nội dung từng ô. Giữ định dạng khoảng trắng đã chuẩn hóa và tối đa 500 ký tự mỗi ô như bản ghi. Không dùng chuỗi `[REDACTED...]` làm định danh thực.
+
+Ví dụ PowerShell:
+
+```powershell
+$env:RECORDER_ROW_CELLS_6 = '["", "Nội dung thực đầy đủ của ô hồ sơ"]'
+$env:RECORDER_TREE_PATH_17 = '["Nhãn GCN thực đầy đủ"]'
+```
+
+Các bước 6 và 17 chỉ là ví dụ từ bản ghi mẫu; dùng số bước trong file mới xuất. Có thể nhập lại JSON cũ để xuất lại với các sửa lỗi modal/jsTree/UUID và tham số dữ liệu che. Ngữ cảnh hàng/tác vụ mới cần ghi lại vì JSON cũ không chứa thông tin đó.
 
 ## Sử dụng
 
