@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Web Actions Recorder
 // @namespace    https://tampermonkey.net/
-// @version      2.3.0
+// @version      2.4.0
 // @description  Ghi thao tac theo tab, tam dung/tiep tuc, kiem tra selector, xuat JSON va Playwright.
 // @match        http://*/*
 // @match        https://*/*
@@ -54,6 +54,7 @@
     const pendingInputs = new Map();
     const pendingWidgets = new Set();
     const selectValues = new WeakMap();
+    const inputValues = new WeakMap();
     let panelHost;
     let scrollTimer;
     let hoverTimer;
@@ -315,6 +316,7 @@
         flushWidgets();
         flushPendingInputs();
         const element = actionableElement(eventElement(event));
+        if (element?.closest('.select2-container, .select2-dropdown')) return;
         if (element && recordWidgetClick(element, event)) return;
         if (element) addStep('click', describeTarget(element), null, { click_count: event.detail || 1,
             modifiers: { ctrl: event.ctrlKey, alt: event.altKey, shift: event.shiftKey, meta: event.metaKey } });
@@ -324,6 +326,7 @@
         if (!state.recording || isPanelEvent(event)) return;
         flushWidgets();
         const element = eventElement(event);
+        if (element?.closest('.select2-container, .select2-dropdown')) return;
         if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element?.isContentEditable)) return;
         if (element instanceof HTMLInputElement && ['file', 'checkbox', 'radio'].includes(element.type)) return;
         const key = element;
@@ -339,6 +342,7 @@
         if (!state.recording || isPanelEvent(event)) return;
         flushWidgets();
         const element = eventElement(event);
+        if (element?.closest('.select2-container, .select2-dropdown')) return;
         if (element instanceof HTMLSelectElement) {
             const signature = JSON.stringify([state.sessionId, Array.from(element.selectedOptions, item => item.value)]);
             if (selectValues.get(element) === signature) return;
@@ -346,6 +350,8 @@
             const option = element.options[element.selectedIndex];
             flushPendingInputs();
             addStep('select', describeTarget(element), element.multiple ? Array.from(element.selectedOptions, (item) => item.value) : element.value, {
+                select2: element.classList.contains('select2-hidden-accessible'),
+                options: Array.from(element.selectedOptions, item => ({ value: item.value, text: cleanText(item.textContent) })),
                 field_name: fieldName(element),
                 option: { text: cleanText(option?.textContent), value: option?.value ?? element.value }
             });
@@ -378,6 +384,9 @@
 
     function recordInput(element, snapshot = inputSnapshot(element)) {
         if (!state.recording) return;
+        const signature = JSON.stringify([state.sessionId, snapshot.action, snapshot.value]);
+        if (inputValues.get(element) === signature) return;
+        inputValues.set(element, signature);
         addStep(snapshot.action, snapshot.target, snapshot.value, { field_name: snapshot.field_name });
     }
 
@@ -447,10 +456,22 @@
         const table = row?.closest('table');
         if (!table) return null;
         const cell = element.closest('td');
-        const link = element.closest('a, button');
+        const link = element.closest('a, button, input, select, textarea, [contenteditable="true"]');
         return { table_selector: shortestSelector(table), cells: Array.from(row.cells, item => cleanText(item.textContent)),
             cell_index: cell?.cellIndex ?? 0, control: link ? link.tagName.toLowerCase() : null,
+            control_selector: link ? relativeControlSelector(link) : null,
             control_text: link ? cleanText(link.textContent) : null };
+    }
+
+    function relativeControlSelector(element) {
+        const tag = element.tagName.toLowerCase();
+        for (const name of ['data-testid', 'name', 'aria-label', 'type']) {
+            const value = element.getAttribute(name);
+            const selector = value ? `${tag}[${name}="${attributeEscape(value)}"]` : tag;
+            if (element.closest('td')?.querySelectorAll(selector).length === 1) return selector;
+        }
+        const controls = Array.from(element.closest('td')?.querySelectorAll(tag) || []);
+        return { tag, index: controls.indexOf(element) };
     }
 
     function stableSelector(selector) {
@@ -637,7 +658,7 @@
                 if (url.origin !== event.origin || !isHostAllowed(url.hostname)) return;
                 const info = frames.get(event.source);
                 appendStep(sanitizeStep({ ...data.step, id: typeof data.step.id === 'string' ? data.step.id : uid(),
-                    frame: info.context || { url: data.step.url, unresolved: true } }));
+                    frame: info.context || (Array.isArray(data.step.frame?.path) && data.step.frame.path.every(part => typeof part === 'string') ? data.step.frame : { url: data.step.url, unresolved: true }) }));
             } catch (_) {}
         }
     });
@@ -649,8 +670,15 @@
     function frameContext() {
         if (window === window.top) return null;
         try {
-            const frame = window.frameElement;
-            return frame ? { css_selector: shortestSelector(frame), name: frame.name || '', src: frame.src || '' } : { url: location.href };
+            const path = [];
+            let current = window;
+            while (current !== window.top) {
+                const frame = current.frameElement;
+                if (!frame) return { url: location.href, unresolved: true };
+                path.unshift(shortestSelector(frame));
+                current = current.parent;
+            }
+            return { css_selector: path[0], path, url: location.href };
         } catch (_) {
             return { url: location.href, cross_origin: true };
         }
@@ -695,7 +723,7 @@
     function shortestSelector(element) {
         const tag = element.tagName.toLowerCase();
         const candidates = [];
-        if (element.id) candidates.push(`#${cssEscape(element.id)}`);
+        if (element.id && !/[0-9a-f]{8}-[0-9a-f-]{27,}|^(?:select2-|j\d+_|jstree-)/i.test(element.id)) candidates.push(`#${cssEscape(element.id)}`);
         for (const name of ['data-testid', 'data-test', 'data-cy', 'name', 'aria-label', 'placeholder']) {
             const value = element.getAttribute(name);
             if (value) {
@@ -704,6 +732,7 @@
             }
         }
         for (const className of Array.from(element.classList).slice(0, 5)) {
+            if (/^(?:active|selected|disabled|show|open|focus|hover|jstree-(?:clicked|checked|open|closed|\d+))$/.test(className)) continue;
             candidates.push(`.${cssEscape(className)}`, `${tag}.${cssEscape(className)}`);
         }
         candidates.push(tag);
@@ -779,6 +808,7 @@
 
     function handleKeydown(event) {
         if (!state.recording || isPanelEvent(event)) return;
+        if (eventElement(event)?.closest('.select2-container, .select2-dropdown')) return;
         if (event.isComposing) return;
         flushWidgets();
         const keys = ['Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Delete', 'Backspace'];
@@ -970,6 +1000,7 @@
     // This function is also embedded verbatim into exported Playwright tests.
     async function replayVbdlisWidget(scope, step) {
         const widget = step.widget;
+        const modifiers = Object.entries(step.modifiers || {}).filter(([, value]) => value).map(([key]) => ({ ctrl: 'Control', shift: 'Shift', alt: 'Alt', meta: 'Meta' })[key]).filter(Boolean);
         if (!widget.after) throw new Error('Không quan sát được trạng thái sau click; ghi lại bước này.');
         const unique = async (locator, name) => {
             await expect(locator, `${name}: cần đúng một phần tử`).toHaveCount(1, { timeout: 15000 });
@@ -1010,7 +1041,7 @@
             for (const property of properties) if (await read(property) !== widget.after[property]) needsClick = true;
             if (needsClick) {
                 const control = { checkbox: ':scope > .jstree-anchor > .jstree-checkbox', expand: ':scope > .jstree-ocl', select: ':scope > .jstree-anchor' }[widget.control];
-                await node.locator(control).click();
+                await node.locator(control).click({ modifiers });
             }
             for (const property of properties) await expect.poll(() => read(property), { timeout: 15000 }).toBe(widget.after[property]);
         } else {
@@ -1025,7 +1056,7 @@
             if (matches.length !== 1) throw new Error(`Hàng dữ liệu khớp ${matches.length} kết quả; kiểm tra bộ lọc và dữ liệu hồ sơ.`);
             const row = rows.nth(matches[0]);
             const selected = () => row.evaluate(el => el.classList.contains('selected') || el.getAttribute('aria-selected') === 'true');
-            if (await selected() !== widget.after.selected) await row.locator(':scope > td').nth(widget.cell_index).click();
+            if (await selected() !== widget.after.selected) await row.locator(':scope > td').nth(widget.cell_index).click({ modifiers });
             await expect.poll(selected, { timeout: 15000 }).toBe(widget.after.selected);
         }
     }
@@ -1037,9 +1068,38 @@
             await frame.waitForFunction(() => {
                 const visible = el => Boolean(el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden';
                 const busy = Array.from(document.querySelectorAll('.dataTables_processing, .dt-processing, [aria-busy="true"], .blockUI.blockOverlay')).some(visible);
-                return !busy && (!window.jQuery || !window.jQuery.active);
+                const key = '__webRecorderReadySince__';
+                if (busy || window.jQuery?.active || document.readyState === 'loading') {
+                    window[key] = 0;
+                    return false;
+                }
+                if (!window[key]) window[key] = performance.now();
+                return performance.now() - window[key] >= 350;
             }, null, { timeout: 20000 });
+            await frame.evaluate(() => { window.__webRecorderReadySince__ = 0; });
         }
+    }
+
+    async function replaySelect2(scope, select, values, options) {
+        const wanted = Array.isArray(values) ? values : [values];
+        const available = await select.locator('option').evaluateAll(elements => elements.map(el => el.value));
+        if (wanted.every(value => available.includes(value))) {
+            await select.selectOption(values, { force: true });
+            return;
+        }
+        const multiple = await select.evaluate(el => el.multiple);
+        if (multiple) await select.selectOption([], { force: true });
+        for (const value of wanted) {
+            const label = options?.find(option => option.value === value)?.text;
+            if (!label || /REDACTED/.test(label)) throw new Error('Select2 AJAX: cần nhãn lựa chọn thực trong options.');
+            await select.locator('xpath=following-sibling::span[contains(@class,"select2-container")][1]').locator('.select2-selection').click();
+            const search = scope.locator('.select2-container--open .select2-search__field').filter({ visible: true });
+            if (await search.count() === 1) await search.fill(label);
+            const result = scope.locator('.select2-results__option[aria-selected], .select2-results__option[role="option"]').filter({ hasText: new RegExp('^\\s*' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '\\s*$') }).filter({ visible: true });
+            await expect(result).toHaveCount(1, { timeout: 20000 });
+            await result.click();
+        }
+        await expect.poll(() => select.evaluate(el => Array.from(el.selectedOptions, option => option.value).sort()), { timeout: 15000 }).toEqual([...wanted].sort());
     }
 
     async function vbdlisTableTarget(scope, context) {
@@ -1059,6 +1119,12 @@
         }, { timeout: 15000, message: 'Cần đúng một hàng khớp nội dung đã ghi' }).toBe(1);
         const cell = rows.nth(index).locator(':scope > td').nth(context.cell_index);
         if (!context.control) return cell;
+        if (context.control_selector) {
+            const selector = context.control_selector;
+            const control = typeof selector === 'string' ? cell.locator(selector) : cell.locator(selector.tag).nth(selector.index);
+            await expect(control).toHaveCount(1);
+            return control;
+        }
         const control = cell.locator(context.control).filter({ hasText: new RegExp('^\\s*' + context.control_text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '\\s*$') });
         await expect(control).toHaveCount(1);
         return control;
@@ -1085,18 +1151,27 @@
 
     function playwrightSource(steps) {
         const q = JSON.stringify;
+        const frameScope = frame => {
+            if (!frame) return 'page';
+            const path = frame.path || (frame.css_selector ? [frame.css_selector] : []);
+            if (frame.unresolved || !path.length || path.some(part => typeof part !== 'string' || /REDACTED/.test(part))) throw new Error('Cần bổ sung đường dẫn iframe');
+            return 'page' + path.map(part => `.frameLocator(${q(stableSelector(part))})`).join('');
+        };
         const lines = ["import { test, expect } from '@playwright/test';", '',
             '// Các giá trị đã che được lấy từ biến môi trường RECORDER_VALUE_<số bước>.',
             'function required(name) {', '  const value = process.env[name];',
             '  if (!value) throw new Error(`Thiếu biến môi trường ${name}`);', '  return value;', '}', '',
-            stableSelector.toString(), '', replayVbdlisWidget.toString(), '', waitVbdlisReady.toString(), '', vbdlisTableTarget.toString(), '',
-            "test('Web Actions Record - VBDLIS', async ({ page }) => {", '  test.setTimeout(180000);'];
-        const literal = (value, number) => /REDACTED/.test(q(value) || '') ? `required('RECORDER_VALUE_${number}')` : q(value);
+            stableSelector.toString(), '', replayVbdlisWidget.toString(), '', waitVbdlisReady.toString(), '', vbdlisTableTarget.toString(), '', replaySelect2.toString(), '',
+            "test('Web Actions Record - VBDLIS', async ({ page }) => {", `  test.setTimeout(${Math.max(180000, steps.length * 30000)});`];
+        const literal = (value, number) => Array.isArray(value) && /REDACTED/.test(q(value) || '')
+            ? `JSON.parse(required('RECORDER_VALUE_${number}'))`
+            : /REDACTED/.test(q(value) || '') ? `required('RECORDER_VALUE_${number}')`
+                : typeof value === 'string' ? `(process.env.RECORDER_VALUE_${number} ?? ${q(value)})` : q(value);
         const locator = (target, step) => {
             if (!target?.css_selector) throw new Error('Thiếu selector');
             if (/REDACTED/.test(q([target.css_selector, target.shadow_path, target.modal?.css_selector]))) throw new Error('Selector đã che dữ liệu; cần thay locator');
             if (step.frame && (!step.frame.css_selector || step.frame.unresolved)) throw new Error('Cần bổ sung đường dẫn iframe');
-            let result = step.frame ? `page.frameLocator(${q(step.frame.css_selector)})` : 'page';
+            let result = frameScope(step.frame);
             if (target.modal?.css_selector && !(target.shadow_path || []).length) {
                 result += `.locator(${q(stableSelector(target.modal.css_selector))}).filter({ visible: true })`;
                 if (target.css_selector === target.modal.css_selector) return result;
@@ -1119,7 +1194,7 @@
                 const previous = steps[index - 1];
                 if (step.widget) {
                     if (step.frame && (!step.frame.css_selector || step.frame.unresolved)) throw new Error('Cần bổ sung đường dẫn iframe');
-                    const scope = step.frame ? `page.frameLocator(${q(step.frame.css_selector)})` : 'page';
+                    const scope = frameScope(step.frame);
                     const payload = `widgetStep${n}`;
                     lines.push(`  const ${payload} = ${q(step)};`);
                     if (step.widget.kind === 'tree' && /REDACTED/.test(q(step.widget.path))) {
@@ -1132,19 +1207,21 @@
                             `  ${payload}.widget.cells = JSON.parse(required('RECORDER_ROW_CELLS_${n}'));`,
                             `  if (!Array.isArray(${payload}.widget.cells) || !${payload}.widget.cells.every(v => typeof v === 'string')) throw new Error('RECORDER_ROW_CELLS_${n} phải là mảng chuỗi');`);
                     }
-                    lines.push(`  await replayVbdlisWidget(${scope}, ${payload});`, '  await page.waitForTimeout(600);', '  await waitVbdlisReady(page);');
+                    lines.push(`  await replayVbdlisWidget(${scope}, ${payload});`, '  await waitVbdlisReady(page);');
                     return;
                 }
                 switch (step.action) {
                     case 'navigate':
                         if (index === 0) lines.push(`  await page.goto(${literal(step.url, n)});`);
-                        else lines.push(`  await expect(page).toHaveURL(${literal(step.url, n)});`);
+                        else if (previous && ['click', 'keypress', 'submit'].includes(previous.action)) lines.push(`  await expect(page).toHaveURL(${literal(step.url, n)}, { timeout: 20000 });`);
+                        else lines.push(`  if (page.url() !== ${literal(step.url, n)}) await page.goto(${literal(step.url, n)});`);
                         break;
-                    case 'wait': lines.push(`  await page.waitForTimeout(${Math.min(step.value, 300000)});`); break;
+                    case 'wait': lines.push(`  if (process.env.RECORDER_KEEP_DELAYS === '1') await page.waitForTimeout(${Math.min(step.value, 300000)});`); break;
                     case 'click': {
+                        if (step.target?.attributes?.type === 'file') break;
                         // A checkbox/radio is replayed by its following state assertion/action.
                         const next = steps[index + 1];
-                        if (next?.action === 'check' && next.target?.css_selector === step.target?.css_selector) break;
+                        if (next?.action === 'check' && next.target?.css_selector === step.target?.css_selector && JSON.stringify(next.frame) === JSON.stringify(step.frame) && JSON.stringify(next.target?.shadow_path) === JSON.stringify(step.target?.shadow_path)) break;
                         if (step.click_count === 1 && next?.action === 'click' && next.click_count === 2 && next.target?.css_selector === step.target?.css_selector && JSON.stringify(next.frame) === JSON.stringify(step.frame)) break;
                         const mods = Object.entries(step.modifiers || {}).filter(([, on]) => on).map(([key]) => ({ ctrl: 'Control', alt: 'Alt', shift: 'Shift', meta: 'Meta' })[key]).filter(Boolean);
                         lines.push(`  await ${loc()}.click({ clickCount: ${Number.isInteger(step.click_count) ? Math.max(1, Math.min(step.click_count, 3)) : 1}, modifiers: ${q(mods)} });`);
@@ -1155,10 +1232,13 @@
                         break;
                     case 'input':
                         lines.push(`  await ${loc()}.${typeof step.value === 'boolean' ? `setChecked(${value})` : `fill(${value})`};`);
-                        if (typeof step.value !== 'boolean') lines.push(`  await ${loc()}.dispatchEvent('change');`);
+                        if (typeof step.value !== 'boolean') lines.push(`  await ${loc()}.blur();`);
                         break;
                     case 'check': lines.push(`  await ${loc()}.setChecked(${value});`); break;
-                    case 'select': lines.push(`  await ${loc()}.selectOption(${value}, { force: true });`); break;
+                    case 'select':
+                        if (step.select2) lines.push(`  await replaySelect2(${frameScope(step.frame)}, ${loc()}, ${value}, ${q(step.options || [])});`);
+                        else lines.push(`  await ${loc()}.selectOption(${value}, { force: true });`);
+                        break;
                     case 'upload': lines.push(`  await ${loc()}.setInputFiles(required('RECORDER_FILE_${n}').split('|'));`); break;
                     case 'keypress': {
                         const mods = Object.entries(step.modifiers || {}).filter(([, on]) => on).map(([key]) => ({ ctrl: 'Control', alt: 'Alt', shift: 'Shift', meta: 'Meta' })[key]).filter(Boolean);
@@ -1166,7 +1246,7 @@
                     }
                     case 'scroll':
                         if (step.target) lines.push(`  await ${loc()}.evaluate((el, pos) => el.scrollTo(pos.x, pos.y), ${q(step.value)});`);
-                        else if (step.frame?.css_selector) lines.push(`  await page.frameLocator(${q(step.frame.css_selector)}).locator('html').evaluate((el, pos) => el.ownerDocument.defaultView.scrollTo(pos.x, pos.y), ${q(step.value)});`);
+                        else if (step.frame?.css_selector) lines.push(`  await ${frameScope(step.frame)}.locator('html').evaluate((el, pos) => el.ownerDocument.defaultView.scrollTo(pos.x, pos.y), ${q(step.value)});`);
                         else if (step.frame) throw new Error('Cần bổ sung đường dẫn iframe');
                         else lines.push(`  await page.evaluate(pos => window.scrollTo(pos.x, pos.y), ${q(step.value)});`);
                         break;
@@ -1178,8 +1258,7 @@
                     default: throw new Error('Action chưa được hỗ trợ');
                 }
                 if (['click', 'input', 'check', 'select', 'submit', 'keypress'].includes(step.action)) {
-                    const slow = /tra cứu|tìm kiếm|lưu|tiếp tục|chọn|xử lý/i.test(step.target?.text || '');
-                    lines.push(`  await page.waitForTimeout(${slow ? 2500 : 700});`, '  await waitVbdlisReady(page);');
+                    lines.push('  await waitVbdlisReady(page);');
                 }
             } catch (error) {
                 lines.push(`  throw new Error(${q(`Bước ${n}: ${error.message}`)});`);
@@ -1211,7 +1290,7 @@
                 .panel{max-width:calc(100vw - 24px)}.panel.collapsed .body{display:none}.header{gap:8px}.collapse{padding:3px 7px}.notice{font-size:11px;color:#fbbf24;margin-top:8px;overflow-wrap:anywhere}.more{width:100%}
             </style>
             <div class="panel">
-                <div class="header"><span>VBDLIS 2.3</span><span class="status"><i class="dot"></i><span class="status-text"></span></span><button class="collapse" title="Thu gọn / mở rộng">−</button></div>
+                <div class="header"><span>VBDLIS 2.4</span><span class="status"><i class="dot"></i><span class="status-text"></span></span><button class="collapse" title="Thu gọn / mở rộng">−</button></div>
                 <div class="body">
                     <div class="count"><span>Số bước đã ghi</span><strong>0</strong></div>
                     <div class="buttons">
