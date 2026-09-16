@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Web Actions Recorder
 // @namespace    https://tampermonkey.net/
-// @version      2.4.0
+// @version      2.5.0
 // @description  Ghi thao tac theo tab, tam dung/tiep tuc, kiem tra selector, xuat JSON va Playwright.
 // @match        http://*/*
 // @match        https://*/*
@@ -525,6 +525,7 @@
         if (!step || typeof step !== 'object' || Array.isArray(step) || !ACTIONS.has(step.action)) return false;
         if (step.target != null && (typeof step.target !== 'object' || Array.isArray(step.target))) return false;
         if (step.target?.css_selector != null && typeof step.target.css_selector !== 'string') return false;
+        if (step.variable != null && (typeof step.variable !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(step.variable) || !['input', 'select', 'check', 'upload'].includes(step.action))) return false;
         if (step.widget != null) {
             const widget = step.widget;
             if (!widget || !['tree', 'table'].includes(widget.kind)) return false;
@@ -1158,6 +1159,14 @@
             return 'page' + path.map(part => `.frameLocator(${q(stableSelector(part))})`).join('');
         };
         const lines = ["import { test, expect } from '@playwright/test';", '',
+            "test.use({ trace: 'retain-on-failure', screenshot: 'only-on-failure' });",
+            'test.afterEach(async ({ page }, testInfo) => {',
+            '  if (testInfo.status === testInfo.expectedStatus) return;',
+            '  await testInfo.attach("recorder-failure", {',
+            '    body: Buffer.from(JSON.stringify({ title: testInfo.title, status: testInfo.status, errors: testInfo.errors.map(error => ({ message: error.message, stack: error.stack })) }, null, 2)),',
+            '    contentType: "application/json"',
+            '  });',
+            '});', '',
             '// Các giá trị đã che được lấy từ biến môi trường RECORDER_VALUE_<số bước>.',
             'function required(name) {', '  const value = process.env[name];',
             '  if (!value) throw new Error(`Thiếu biến môi trường ${name}`);', '  return value;', '}', '',
@@ -1188,9 +1197,11 @@
             const step = { ...sanitizeStep(raw), step: index + 1 };
             const n = index + 1;
             lines.push(`  // Bước ${n}: ${step.action}`);
+            lines.push(`  await test.step(${q(`Bước ${n}: ${step.action}${step.variable ? ` [${step.variable}]` : ''}`)}, async () => {`);
             try {
                 const loc = () => locator(step.target, step);
-                const value = literal(step.value, n);
+                const value = step.variable ? (Array.isArray(step.value) || typeof step.value === 'boolean'
+                    ? `JSON.parse(required(${q(step.variable)}))` : `required(${q(step.variable)})`) : literal(step.value, n);
                 const previous = steps[index - 1];
                 if (step.widget) {
                     if (step.frame && (!step.frame.css_selector || step.frame.unresolved)) throw new Error('Cần bổ sung đường dẫn iframe');
@@ -1236,10 +1247,10 @@
                         break;
                     case 'check': lines.push(`  await ${loc()}.setChecked(${value});`); break;
                     case 'select':
-                        if (step.select2) lines.push(`  await replaySelect2(${frameScope(step.frame)}, ${loc()}, ${value}, ${q(step.options || [])});`);
+                        if (step.select2) lines.push(`  await replaySelect2(${frameScope(step.frame)}, ${loc()}, ${value}, ${step.variable ? `(process.env[${q(`${step.variable}_OPTIONS`)}] ? JSON.parse(process.env[${q(`${step.variable}_OPTIONS`)}]) : ${q(step.options || [])})` : q(step.options || [])});`);
                         else lines.push(`  await ${loc()}.selectOption(${value}, { force: true });`);
                         break;
-                    case 'upload': lines.push(`  await ${loc()}.setInputFiles(required('RECORDER_FILE_${n}').split('|'));`); break;
+                    case 'upload': lines.push(`  await ${loc()}.setInputFiles(required(${q(step.variable || `RECORDER_FILE_${n}`)}).split('|'));`); break;
                     case 'keypress': {
                         const mods = Object.entries(step.modifiers || {}).filter(([, on]) => on).map(([key]) => ({ ctrl: 'Control', alt: 'Alt', shift: 'Shift', meta: 'Meta' })[key]).filter(Boolean);
                         lines.push(`  await ${loc()}.press(${q([...mods, step.value].join('+'))});`); break;
@@ -1262,6 +1273,8 @@
                 }
             } catch (error) {
                 lines.push(`  throw new Error(${q(`Bước ${n}: ${error.message}`)});`);
+            } finally {
+                lines.push('  });');
             }
         });
         lines.push('});', '');
@@ -1271,7 +1284,67 @@
     async function downloadPlaywright() {
         await flushAllFrames();
         flushAllPending();
+        const report = preflight(state.steps);
+        if (report.errors.length) { alert('Chưa thể xuất Playwright:\n' + report.errors.join('\n')); return; }
+        if (report.variables.length) alert('Các biến môi trường cần cung cấp:\n' + report.variables.join('\n'));
         downloadFile('web-actions.spec.js', playwrightSource(state.steps), 'text/javascript;charset=utf-8');
+        persistState();
+    }
+
+    function preflight(steps) {
+        const errors = [];
+        const variables = new Set();
+        if (!steps.length) errors.push('Kịch bản chưa có bước.');
+        steps.forEach((step, index) => {
+            const n = index + 1;
+            const fail = message => errors.push(`Bước ${n}: ${message}`);
+            if (!validStep(step)) { fail('Schema không hợp lệ.'); return; }
+            if (step.variable) variables.add(step.variable);
+            if (step.frame && (step.frame.unresolved || !(step.frame.path?.length || step.frame.css_selector))) fail('Thiếu đường dẫn iframe.');
+            if (step.frame && /REDACTED/.test(JSON.stringify(step.frame.path || step.frame.css_selector))) fail('Đường dẫn iframe đã bị che.');
+            const targets = [step.target, ...(step.action === 'drag_drop' ? [step.source] : [])];
+            if (!['navigate', 'wait', 'scroll'].includes(step.action) && !step.widget && !step.target?.css_selector) fail('Thiếu selector đích.');
+            if (step.action === 'drag_drop' && !step.source?.css_selector) fail('Thiếu selector nguồn kéo.');
+            for (const target of targets.filter(Boolean)) {
+                if (/REDACTED/.test(JSON.stringify([target.css_selector, target.shadow_path, target.modal?.css_selector, target.table_context?.table_selector]))) fail('Selector chứa dữ liệu đã che.');
+                if (/REDACTED/.test(JSON.stringify(target.table_context?.cells))) variables.add(`RECORDER_ROW_CELLS_${n}`);
+            }
+            if (step.action === 'navigate') {
+                if (!step.url || !/^https?:\/\//i.test(step.url)) fail('URL điều hướng không hợp lệ.');
+                if (/REDACTED/.test(step.url)) variables.add(`RECORDER_VALUE_${n}`);
+            }
+            if (step.action === 'upload') variables.add(step.variable || `RECORDER_FILE_${n}`);
+            if (!step.variable && /REDACTED/.test(JSON.stringify(step.value))) variables.add(`RECORDER_VALUE_${n}`);
+            if (step.select2 && (!Array.isArray(step.options) || step.options.some(option => !option || typeof option.text !== 'string' || !option.text || /REDACTED/.test(option.text)))) fail('Select2 cần options có nhãn thực; sửa bước trước khi xuất.');
+            if (step.widget) {
+                if (!step.widget.after) fail('Thiếu trạng thái widget sau thao tác.');
+                const key = step.widget.kind === 'tree' ? 'path' : 'cells';
+                if (/REDACTED/.test(JSON.stringify(step.widget[key]))) variables.add(`RECORDER_${key === 'path' ? 'TREE_PATH' : 'ROW_CELLS'}_${n}`);
+                if (step.widget.kind === 'tree' && !step.widget.path.length) fail('Đường dẫn cây trống.');
+                if (/REDACTED/.test(JSON.stringify([step.widget.tree_selector, step.widget.table_selector]))) fail('Selector widget đã bị che.');
+            }
+        });
+        return { errors, variables: [...variables].sort() };
+    }
+
+    async function inspectRecording() {
+        await flushAllFrames();
+        flushAllPending();
+        const report = preflight(state.steps);
+        alert([report.errors.length ? report.errors.join('\n') : 'Kiểm tra cấu trúc: đạt.',
+            'Biến cần cung cấp:', report.variables.join('\n') || '(không có)',
+            'Selector và dữ liệu thực tế cần được xác minh khi chạy trên VBDLIS.'].join('\n\n'));
+    }
+
+    function assignVariable(index) {
+        const step = state.steps[index];
+        const value = prompt('Tên biến môi trường, ví dụ MA_HO_SO, SO_TO, SO_THUA. Để trống để bỏ biến.', step.variable || '');
+        if (value === null) return;
+        const name = value.trim();
+        if (name && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) { alert('Tên biến chỉ gồm chữ Latin, số, dấu gạch dưới; không bắt đầu bằng số.'); return; }
+        if (name) step.variable = name;
+        else delete step.variable;
+        saveState();
         persistState();
     }
 
@@ -1290,7 +1363,7 @@
                 .panel{max-width:calc(100vw - 24px)}.panel.collapsed .body{display:none}.header{gap:8px}.collapse{padding:3px 7px}.notice{font-size:11px;color:#fbbf24;margin-top:8px;overflow-wrap:anywhere}.more{width:100%}
             </style>
             <div class="panel">
-                <div class="header"><span>VBDLIS 2.4</span><span class="status"><i class="dot"></i><span class="status-text"></span></span><button class="collapse" title="Thu gọn / mở rộng">−</button></div>
+                <div class="header"><span>VBDLIS 2.5</span><span class="status"><i class="dot"></i><span class="status-text"></span></span><button class="collapse" title="Thu gọn / mở rộng">−</button></div>
                 <div class="body">
                     <div class="count"><span>Số bước đã ghi</span><strong>0</strong></div>
                     <div class="buttons">
@@ -1299,6 +1372,7 @@
                         <button class="undo">Hoàn tác bước cuối</button><button class="clear">Xóa dữ liệu</button>
                         <button class="download wide">Tải JSON kịch bản</button>
                         <button class="playwright wide">Xuất Playwright</button>
+                        <button class="preflight wide">Kiểm tra kịch bản</button>
                         <button class="import wide">Nhập JSON và tiếp tục</button><input class="file hidden" type="file" accept="application/json,.json">
                     </div>
                     <div class="notice" role="status"></div>
@@ -1317,6 +1391,7 @@
         shadow.querySelector('.stop').addEventListener('click', stopRecording);
         shadow.querySelector('.resume').addEventListener('click', resumeRecording);
         shadow.querySelector('.playwright').addEventListener('click', downloadPlaywright);
+        shadow.querySelector('.preflight').addEventListener('click', inspectRecording);
         shadow.querySelector('.manager').addEventListener('toggle', renderSteps);
         shadow.querySelector('.more').addEventListener('click', () => { visibleSteps += 100; renderedRevision = -1; renderSteps(); });
         shadow.querySelector('.collapse').addEventListener('click', () => {
@@ -1406,6 +1481,14 @@
             inspect.disabled = !step.target;
             inspect.addEventListener('click', () => inspectStep(index));
             actions.append(inspect, edit, remove);
+            if (['input', 'select', 'check', 'upload'].includes(step.action)) {
+                const variable = document.createElement('button');
+                variable.textContent = 'Biến';
+                variable.title = step.variable || 'Gán biến nghiệp vụ';
+                variable.addEventListener('click', () => assignVariable(index));
+                actions.append(variable);
+                if (step.variable) action.textContent += ` · ${step.variable}`;
+            }
             row.append(number, main, actions);
             container.appendChild(row);
         });

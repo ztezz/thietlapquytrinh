@@ -11,6 +11,8 @@ function extract(name) {
     return source.slice(offset, end + 6);
 }
 const context = vm.createContext({ sanitizeStep: value => value });
+vm.runInContext("const ACTIONS = new Set(['navigate', 'wait', 'click', 'dblclick', 'input', 'check', 'select', 'upload', 'keypress', 'scroll', 'hover', 'drag_drop', 'submit']);", context);
+for (const name of ['validStep', 'preflight']) vm.runInContext(extract(name), context);
 for (const name of ['stableSelector', 'replayVbdlisWidget', 'waitVbdlisReady', 'vbdlisTableTarget', 'replaySelect2', 'playwrightSource']) {
     vm.runInContext(extract(name), context);
 }
@@ -35,6 +37,21 @@ assert.match(output, /await replaySelect2\(page/);
 assert.doesNotMatch(output, /locator\("#file"\)\.click/);
 assert.match(output, /frameLocator\("#outer"\)\.frameLocator\("#inner"\)/);
 assert.match(output, /RECORDER_KEEP_DELAYS/);
+assert.match(output, /trace: 'retain-on-failure'/);
+assert.match(output, /await test.step/);
+const named = context.playwrightSource([{ action: 'input', target: { css_selector: '#id' }, value: 'old', variable: 'MA_HO_SO' },
+    { action: 'check', target: { css_selector: '#check' }, value: false, variable: 'DA_CHON' },
+    { action: 'upload', target: { css_selector: '#upload' }, value: [], variable: 'TAI_LIEU' }]);
+new vm.Script(named.replace("import { test, expect } from '@playwright/test';", ''));
+assert.match(named, /fill\(required\("MA_HO_SO"\)\)/);
+assert.match(named, /setChecked\(JSON.parse\(required\("DA_CHON"\)\)\)/);
+assert.match(named, /required\("TAI_LIEU"\)\.split/);
+assert.equal(context.preflight([{ action: 'click' }]).errors.length, 1);
+assert.equal(context.preflight([{ action: 'input', target: { css_selector: '#id' }, value: 'x', variable: 'invalid-name' }]).errors.length, 1);
+assert.equal(context.preflight([{ action: 'select', target: { css_selector: '#s' }, value: 'x', select2: true }]).errors.length, 1);
+assert.ok(context.preflight([{ action: 'input', target: { css_selector: '#id' }, value: 'x', variable: 'MA_HO_SO' }]).variables.includes('MA_HO_SO'));
+const widgetOutput = context.playwrightSource([{ action: 'click', target: { css_selector: '#node' }, widget: { kind: 'tree', path: ['Root'], after: { selected: true } } }]);
+new vm.Script(widgetOutput.replace("import { test, expect } from '@playwright/test';", ''));
 async function testTableControl() {
     const control = {};
     const cell = { locator(selector) { assert.equal(selector, 'input[name="area"]'); return control; } };
