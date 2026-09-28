@@ -70,7 +70,7 @@
             steps: [],
             lastUrl: '',
             updatedAt: Date.now(),
-            settings: { allowedHosts: [], maskSensitive: true, recordHover: false }
+            settings: { allowedHosts: [], maskSensitive: false, recordHover: false }
         };
     }
 
@@ -84,7 +84,7 @@
             updatedAt: Number(value.updatedAt) || 0,
             settings: {
                 allowedHosts: Array.isArray(value.settings?.allowedHosts) ? value.settings.allowedHosts.filter((host) => typeof host === 'string') : [],
-                maskSensitive: value.settings?.maskSensitive !== false,
+                maskSensitive: value.settings?.maskSensitive === true,
                 recordHover: Boolean(value.settings?.recordHover)
             }
         };
@@ -368,7 +368,7 @@
 
     function inputSnapshot(element) {
         let value;
-        if (element instanceof HTMLInputElement && element.type === 'password') {
+        if (element instanceof HTMLInputElement && element.type === 'password' && state.settings.maskSensitive) {
             value = '[REDACTED]';
         } else if (element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(element.type)) {
             value = element.checked;

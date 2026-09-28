@@ -16,7 +16,7 @@ Userscript dành cho Tampermonkey trên Chrome và Edge, dùng để ghi thao t�
 - Lưu bằng `sessionStorage` và bộ nhớ Tampermonkey.
 - Đồng bộ trạng thái giữa các tab khi trình quản lý userscript hỗ trợ.
 - Có danh sách domain cho phép để giới hạn phạm vi ghi.
-- Mặc định che mật khẩu, token, OTP, email, điện thoại và thông tin thẻ.
+- Mặc định lưu đầy đủ giá trị đã ghi để JSON có thể dùng lại trực tiếp; có tùy chọn che dữ liệu khi cần chia sẻ.
 
 ## Cài đặt
 
@@ -41,10 +41,10 @@ Nút **Nhập JSON và tiếp tục** chấp nhận cả object có thuộc tín
 ## Cài đặt ghi
 
 - **Domain cho phép**: nhập hostname cách nhau bằng dấu phẩy, ví dụ `example.com, internal.test`. Subdomain cũng được chấp nhận. Để trống để cho phép mọi domain phù hợp với metadata.
-- **Che dữ liệu nhạy cảm**: thay giá trị nhạy cảm bằng các chuỗi như `[REDACTED]`, `[REDACTED_EMAIL]` hoặc `[REDACTED_PHONE]`.
+- **Che dữ liệu nhạy cảm**: tùy chọn này mặc định tắt. Khi bật, thay giá trị nhạy cảm bằng các chuỗi như `[REDACTED]`, `[REDACTED_EMAIL]` hoặc `[REDACTED_PHONE]`.
 - **Ghi hover**: chỉ ghi khi con trỏ giữ trên mục tiêu khoảng 0,8 giây để hạn chế nhiễu.
 
-Không nên tắt che dữ liệu nhạy cảm khi kịch bản được chia sẻ hoặc đưa vào Git.
+Khi kịch bản được chia sẻ hoặc đưa vào Git, hãy bật che dữ liệu nhạy cảm trước khi ghi.
 
 ## Định dạng JSON
 
@@ -55,7 +55,7 @@ Không nên tắt che dữ liệu nhạy cảm khi kịch bản được chia s�
   "exported_at": "2026-08-19T10:00:00.000Z",
   "settings": {
     "allowedHosts": [],
-    "maskSensitive": true,
+    "maskSensitive": false,
     "recordHover": false
   },
   "total_steps": 2,
